@@ -1,0 +1,380 @@
+from anthropic import Anthropic
+from django.conf import settings
+from .models import Conversation, AgentLog
+from .event_queue import publish
+from .tools import get_order_details, get_refund_history, check_delivery_status, get_customer_risk_profile
+
+client = Anthropic(
+    api_key=settings.ANTHROPIC_API_KEY,  # This is the default and can be omitted
+)
+
+anthropic_model = settings.API_MODEL
+
+#SUPPORT SYSTEM PROMPT ->Maya's job desc
+SUPPORT_SYSTEM_PROMPT = """
+You are Maya, a customer support agent at CoolBreeze AC.
+You help customers with issues related to their AC orders.
+
+Your responsibilities:
+- Always use your tools to gather facts before responding
+- Check order details when customer mentions their order
+- Check refund history before making any refund decisions
+- Be empathetic but honest
+
+Your personality:
+- Friendly and professional
+- Patient even when customer is angry
+- Clear and concise in your replies
+- No emojies
+
+Important rules:
+- Always check order details first before responding
+- Never approve or deny a refund yourself
+- If refund decision is needed — tell customer you are checking with your team
+- Never use bold text, bullet points or any markdown formatting. Plain text only.
+- Keep replies concise and conversational. Maximum 3-4 sentences. No long paragraphs.
+"""
+
+
+MANAGER_SYSTEM_PROMPT = """
+You are a senior support manager at CoolBreeze AC.
+A support agent has escalated a customer case to you for a refund decision.
+
+Your responsibilities:
+- Review the case summary carefully
+- Consider the customer's refund history
+- Make a fair and final refund decision
+- Give a clear reason for your decision
+
+Your decision options:
+- Approve refund — if the case is genuine and within policy
+- Deny refund — if the case is suspicious or outside policy
+- Escalate to risk team — if you suspect fraud
+
+Important rules:
+- Be fair but firm
+- Base decision on facts — not emotions
+- Always give a specific reason for your decision
+- Keep your response concise and professional
+"""
+
+
+RISK_SYSTEM_PROMPT = """
+You are a fraud risk analyst at CoolBreeze AC.
+A support manager has sent you a customer profile for risk assessment.
+
+Your job:
+- Analyse the customer's order and refund patterns
+- Identify suspicious behaviour
+- Return a clear risk verdict
+
+Risk levels:
+- LOW — genuine customer, normal behaviour
+- MEDIUM — some suspicious signals, proceed with caution
+- HIGH — clear fraud pattern, recommend denial
+
+Your response format:
+- Risk Level: LOW / MEDIUM / HIGH
+- Key Signals: what you found suspicious or genuine
+- Recommendation: what manager should do
+
+Important:
+- Be objective — base verdict on data only
+- One bad refund does not make someone fraudulent
+- Look for patterns — not isolated incidents
+"""
+
+#SUPPORT TOOLS -> tool schemas,  AI Agents will read
+SUPPORT_TOOLS=[
+    {
+        "name": "get_order_details",
+        "description":"Fetch complete order details including status, carrier, tracking number and days since order was placed. Use this when customer mentions their order or complains about delivery.",
+        "input_schema":{
+            "type":"object",
+            "properties": {
+                "order_id": {
+                        "type": "integer",
+                        "description":"the order ID to look up"
+                }
+            },
+            "required": ['order_id']
+        }
+    },
+    {
+        "name": "get_refund_history",
+        "description": "Get complete refund history for a user. Use this before making any refund related decisions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "The user ID to check refund history for"
+                }
+            },
+            "required": ["user_id"]
+        }
+    },
+
+    {
+        "name": "check_delivery_status",
+        "description": "Check current delivery status using tracking number and carrier. Use this when customer complains about delayed or missing delivery.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tracking_number": {
+                    "type": "string",
+                    "description": "The shipment tracking number"
+                },
+                "carrier": {
+                    "type": "string",
+                    "description": "The carrier name for example BlueDart or Delhivery"
+                }
+            },
+            "required": ["tracking_number", "carrier"]
+        }
+    },
+    {
+        "name": "escalate_to_manager",
+        "description": "Escalate the case to manager for refund decision. Always include customer's user_id in the case summary so manager can assess fraud risk accurately.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "case_summary": {
+                    "type": "string",
+                    "description": "Complete case summary. Must include: customer user_id, order details, refund history and complaint. Format: Start with 'Customer User ID: X' on the first line."
+                }
+            },
+            "required": ["case_summary"]
+        }
+    },
+
+]
+
+MANAGER_TOOLS = [
+    {
+        "name": "assess_fraud_risk",
+        "description": "Consult the risk agent to assess fraud risk for a customer. Use this when refund request looks suspicious or customer has multiple refund requests. Pass the user_id to get a risk verdict.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "The user ID to assess fraud risk for"
+                }
+            },
+            "required": ["user_id"]
+        }
+    }
+]
+
+
+RISK_TOOLS = [
+    {
+        "name": "get_customer_risk_profile",
+        "description": "Get complete risk profile for a customer including order history, refund patterns and ratio. Use this to assess fraud risk.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "The user ID to assess risk for"
+                }
+            },
+            "required": ["user_id"]
+        }
+    }
+]
+
+
+#execute_tools() -> bridge betwen claude and python functions
+
+def execute_tool(tool_name, tool_input, conversation_id):
+    if tool_name == "get_order_details":
+        return get_order_details(tool_input['order_id'])
+    if tool_name == "get_refund_history":
+        return get_refund_history(tool_input["user_id"])
+    if tool_name == "check_delivery_status":
+        return check_delivery_status(tool_input["tracking_number"], tool_input["carrier"])
+    if tool_name == "escalate_to_manager":
+        case_summary = tool_input["case_summary"]
+        MANAGERresult = run_manager_agent(case_summary, conversation_id)
+        print("++++++", MANAGERresult, "++++++")
+        return MANAGERresult
+    if tool_name == "assess_fraud_risk":
+        user_id = tool_input["user_id"]
+        RISKresult = run_risk_agent(user_id, conversation_id)
+        print("++++++", RISKresult, "++++++")
+        return RISKresult
+    if tool_name == "get_customer_risk_profile":
+        return get_customer_risk_profile(tool_input["user_id"])
+
+
+#Agent Loop, while loop
+
+def run_support_agent(user_message, conversation_id, order_id, user_id):
+    conv = Conversation.objects.get(id = conversation_id)
+    conversation_history =[]
+    for i in conv.messages.order_by("created_at"):
+        conversation_history.append({
+            "role": "assistant" if i.role == "agent" else "user",
+            "content": i.content
+        })
+
+    #se nd this conv to LLm
+    while True:
+        response = client.messages.create(
+            max_tokens=1024,
+            model=anthropic_model,
+            messages=conversation_history,
+            system=SUPPORT_SYSTEM_PROMPT + f"\n\nContext: This Conversation is about Order Number #{order_id} of User: #{user_id}",
+            tools=SUPPORT_TOOLS
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_result =[]
+            for block in response.content:
+                if block.type == "tool_use":
+                    event_type = {"type":"final", "message": f"Calling tool #{block.name} with #{block.input}" }
+                    publish(conversation_id, event_type)
+                    AgentLog.objects.create(conversation=conv, event_type="tool_use", message=f"Calling tool #{block.name} with #{block.input}")
+                    result = execute_tool(block.name, block.input, conversation_id)
+                    event_type = {"type":"final", "message": f"#{block.name} returned: #{str(result)[:200]}"}
+                    publish(conversation_id, event_type)
+                    AgentLog.objects.create(conversation=conv, event_type="tool_result", message=f"#{block.name} returned: #{str(result)[:200]}")
+                    tool_result.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result)
+                    })
+
+            conversation_history.append({
+                "role": "assistant",
+                "content": response.content
+            })
+
+            conversation_history.append({
+                "role": "user",
+                "content": tool_result
+            })
+
+        else:
+            final_text = "".join(
+                block.text
+                for block in response.content
+                if block.type == "text"
+            )
+            event_type = {"type":"final", "message": final_text}
+            publish(conversation_id, event_type)
+            AgentLog.objects.create(conversation=conv, event_type="final", message=final_text)
+            return final_text
+
+def run_manager_agent(case_summary, conversation_id):
+    conv= Conversation.objects.get(id= conversation_id)
+    event_type = {"type":"final", "message": f"Case received to manager for Review: #{case_summary[:200]}"}
+    publish(conversation_id, event_type)
+    AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Case received to manager for Review: #{case_summary[:200]}")
+    manager_messages = [{
+        "role": 'user',
+        "content": case_summary
+    }]
+
+    while True:
+        response = client.messages.create(
+            model=anthropic_model,
+            max_tokens=1024,
+            messages=manager_messages,
+            system=MANAGER_SYSTEM_PROMPT,
+            tools=MANAGER_TOOLS
+        )
+
+        if response.stop_reason == 'tool_use':
+            tool_result =[]
+            for block in response.content:
+                if block.type == 'tool_use':
+                    event_type = {"type":"final", "message": f"Consulting Risk Agent for Fraud Assessment..."}
+                    publish(conversation_id, event_type)
+                    AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Consulting Risk Agent for Fraud Assessment...")
+                    result = execute_tool(block.name, block.input, conversation_id)
+                    tool_result.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result)
+                    })
+
+            manager_messages.append({
+                "role": 'assistant',
+                "content": response.content
+            })
+            manager_messages.append({
+                "role": "user",
+                "content": tool_result
+            })
+
+        else: 
+            final_text = "".join(
+                block.text
+                for block in response.content
+                if block.type == "text"
+            )
+            event = {"type": "manager", "message": f"Decision: {final_text[:200]}"}
+            publish(conversation_id, event)
+            AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Decision: #{final_text[:200]}")
+            return final_text
+
+def run_risk_agent(user_id, conversation_id):
+    conv = Conversation.objects.get(id=conversation_id)
+    event = {"type": "risk", "message": f"Starting fraud assessment for user {user_id}"}
+    publish(conversation_id, event)
+    AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Case received to Risk Agent of user id #{user_id} for Fraud Assessment, Started Analysis")
+    risk_messages = [
+        {
+        "role": "user",
+        "content": f"Please assess the fraud risk for user ID {user_id}. User your tool to get their profile and return a verdict."
+        }
+    ]
+
+    while True:
+        response = client.messages.create(
+            model=anthropic_model,
+            max_tokens=1024,
+            system=RISK_SYSTEM_PROMPT,
+            tools=RISK_TOOLS,
+            messages=risk_messages
+        )
+        print("risk stop_reason===>", response.stop_reason)
+        if response.stop_reason == 'tool_use':
+            tool_result=[]
+            for block in response.content:
+                if block.type == 'tool_use':
+                    event = {"type": "risk", "message": f"Calling {block.name} to get customer risk profile..."}
+                    publish(conversation_id, event)
+                    AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Calling tool #{block.name} with #{block.input}")
+                    result= execute_tool(block.name, block.input, conversation_id)
+                    tool_result.append({
+                        "type":'tool_result',
+                        "tool_use_id": block.id,
+                        "content": str(result)
+                    })
+
+            risk_messages.append({
+                "role": "assistant",
+                "content": response.content
+            })
+
+            risk_messages.append({
+                "role": 'user',
+                "content": tool_result
+            })
+
+        else: 
+            final_text = "".join(
+                block.text
+                for block in response.content
+                if block.type == "text"
+            ) 
+            event = {"type": "risk", "message": f"Verdict: {final_text[:200]}"}
+            publish(conversation_id, event)
+            AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Verdict: #{final_text[:200]}")
+            return final_text
+
+
