@@ -3,7 +3,7 @@ import json
 from django.http import JsonResponse, StreamingHttpResponse
 import time
 from .agents import run_support_agent
-from .event_queue import subscribe, unsubscribe
+from .event_queue import subscribe, unsubscribe, publish
 from .models import Message, Conversation, AgentLog
 from orders.models import Order
 from django.contrib.admin.views.decorators import staff_member_required
@@ -20,7 +20,8 @@ def chat(request, id):
         order = get_object_or_404(Order, id=id, user =  request.user)
         conversation, created = Conversation.objects.get_or_create(user = request.user, order=order)
         Message.objects.create(conversation=conversation,role='user',content = user_message)
-
+        event = {"type": "user_message", "message": user_message, "name": request.user.first_name}
+        publish(conversation.id, event)
         #send user message and conversation to LLM
         reply = run_support_agent(user_message, conversation.id, order.id, request.user.id)
         #store the LLM reply

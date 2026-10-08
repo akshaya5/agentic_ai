@@ -49,7 +49,7 @@
             <div class="card-header fw-semibold" style="font-size:13px;">
               Chat Transcript
             </div>
-            <div class="card-body overflow-auto d-flex flex-column gap-3" style="height: 50vh;">
+            <div id="chat-transcript" class="card-body overflow-auto d-flex flex-column gap-3" style="height: 50vh;">
               {% for msg in messages%}
               <!-- Customer message -->
               {% if msg.role == 'user'%}
@@ -83,7 +83,7 @@
               <div style="width:8px;height:8px;border-radius:50%;background:#1D9E75;"></div>
               <span class="fw-semibold">Agent Activity</span>
             </div>
-            <div class="card-body overflow-auto d-flex flex-column gap-3" style="height: 50vh;">
+            <div id="agent-activity" class="card-body overflow-auto d-flex flex-column gap-3" style="height: 50vh;">
               {% for log in logs %}
               <!-- Log entry -->
               <div>
@@ -140,6 +140,7 @@
     }
 
     function showSpinner(){
+      const agentActivity = document.getElementById("agent-activity");
       document.getElementById("agent-activity").insertAdjacentHTML("beforeend", 
         `<div class="spinner-border spinner-border-sm" id="agent-spinner" role="status"></div>`
       );
@@ -152,7 +153,7 @@
 
     function appendLog(type, message){
       const agentActivity = document.getElementById("agent-activity");
-      const time = new Date().toLocaleTimeString([],  {hour: '2-digit', minute: '2-digit', hour12: true});
+      const time = new Date().toLocaleTimeString("en-IN",{timeZone: "Asia/Kolkata", hour: '2-digit', minute: '2-digit', hour12: true});
 
       const badgeColors = {
         "tool_call": "bg-primary",
@@ -162,7 +163,7 @@
         "final": "bg-success"
       }
 
-      const badgeColor = badgeColors[type] || bg-secondary; // badgeColors["manager"]
+      const badgeColor = badgeColors[type] || "bg-secondary"; // badgeColors["manager"]
 
       agentActivity.insertAdjacentHTML("beforeend", `
         <div>
@@ -209,10 +210,11 @@
         showSpinner();
       };
 
-      source.onerror = () => {
-        console.log("SSE connection closed.");
-        source.close();
-      }
+    }
+    
+    source.onerror = () => {
+      console.log("SSE connection closed.");
+      source.close();
     }
 
 

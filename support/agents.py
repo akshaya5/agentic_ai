@@ -234,11 +234,11 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             tool_result =[]
             for block in response.content:
                 if block.type == "tool_use":
-                    event_type = {"type":"final", "message": f"Calling tool #{block.name} with #{block.input}" }
+                    event_type = {"type":"tool_use", "message": f"Calling tool #{block.name} with #{block.input}" }
                     publish(conversation_id, event_type)
                     AgentLog.objects.create(conversation=conv, event_type="tool_use", message=f"Calling tool #{block.name} with #{block.input}")
                     result = execute_tool(block.name, block.input, conversation_id)
-                    event_type = {"type":"final", "message": f"#{block.name} returned: #{str(result)[:200]}"}
+                    event_type = {"type":"tool_use", "message": f"#{block.name} returned: #{str(result)[:200]}"}
                     publish(conversation_id, event_type)
                     AgentLog.objects.create(conversation=conv, event_type="tool_result", message=f"#{block.name} returned: #{str(result)[:200]}")
                     tool_result.append({
@@ -270,7 +270,7 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
 
 def run_manager_agent(case_summary, conversation_id):
     conv= Conversation.objects.get(id= conversation_id)
-    event_type = {"type":"final", "message": f"Case received to manager for Review: #{case_summary[:200]}"}
+    event_type = {"type":"manager", "message": f"Case received to manager for Review: #{case_summary[:200]}"}
     publish(conversation_id, event_type)
     AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Case received to manager for Review: #{case_summary[:200]}")
     manager_messages = [{
@@ -291,7 +291,7 @@ def run_manager_agent(case_summary, conversation_id):
             tool_result =[]
             for block in response.content:
                 if block.type == 'tool_use':
-                    event_type = {"type":"final", "message": f"Consulting Risk Agent for Fraud Assessment..."}
+                    event_type = {"type":"manager", "message": f"Consulting Risk Agent for Fraud Assessment..."}
                     publish(conversation_id, event_type)
                     AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Consulting Risk Agent for Fraud Assessment...")
                     result = execute_tool(block.name, block.input, conversation_id)
