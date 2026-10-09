@@ -148,5 +148,5 @@ API_MODEL=config("API_MODEL")
 STATICFILES_STORAGE = 'whitenoise.storage.StaticFilesStorage'
 
 CSRF_TRUSTED_ORIGINS = {
-    "https://djangoaiemployees-production.up.railway.app"
+    "https://agenticai-production-30a7.up.railway.app"
 }
